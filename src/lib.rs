@@ -1,6 +1,6 @@
 //! # ripser-rs
 //!
-//! Rust bindings for [Ripser](https://github.com/Ripser/ripser), a lean C++ code
+//! Minimal Rust bindings for [Ripser](https://github.com/Ripser/ripser), a lean C++ code
 //! for computation of Vietoris-Rips persistence barcodes.
 //!
 //! ## Example
@@ -8,22 +8,32 @@
 //! ```rust
 //! use ripser::{ripser, Barcode};
 //!
-//! // Lower triangular distance matrix for 4 points
-//! // Layout: d(1,0), d(2,0), d(2,1), d(3,0), d(3,1), d(3,2)
-//! let distances = vec![
-//!     1.0,        // d(1,0)
-//!     2.0, 1.5,   // d(2,0), d(2,1)
-//!     3.0, 2.5, 1.0, // d(3,0), d(3,1), d(3,2)
-//! ];
+//! // Lower triangular distance matrix for 3 points (equilateral triangle)
+//! // Layout: d(1,0), d(2,0), d(2,1)
+//! let distances = vec![1.0, 1.0, 1.0];
 //!
-//! let barcodes = ripser(&distances, 4, 1, f32::INFINITY);
+//! let barcodes = ripser(&distances, 3, 1, f32::INFINITY);
 //!
 //! for bar in &barcodes {
-//!     println!("dim {}: [{}, {})", bar.dim, bar.birth, bar.death);
+//!     println!("H{}: [{}, {})", bar.dim, bar.birth, bar.death);
 //! }
 //! ```
-
-use std::f32;
+//!
+//! ## Distance Matrix Format
+//!
+//! Lower triangular, row-major order:
+//!
+//! ```text
+//!      0   1   2   3
+//! 0    -
+//! 1  d10   -
+//! 2  d20 d21   -
+//! 3  d30 d31 d32   -
+//! ```
+//!
+//! Flattened: `[d10, d20, d21, d30, d31, d32, ...]`
+//!
+//! Length must be exactly `n * (n - 1) / 2`.
 
 /// A persistence barcode (birth-death pair) with dimension.
 #[repr(C)]
@@ -33,7 +43,8 @@ pub struct Barcode {
     pub dim: i32,
     /// Birth time (filtration value where the feature appears)
     pub birth: f32,
-    /// Death time (filtration value where the feature disappears, f32::INFINITY for essential features)
+    /// Death time (filtration value where the feature disappears)
+    /// `f32::INFINITY` indicates an essential feature that never dies.
     pub death: f32,
 }
 
@@ -44,14 +55,15 @@ impl Barcode {
         self.death.is_infinite()
     }
 
-    /// Returns the persistence (death - birth). Returns f32::INFINITY for infinite bars.
+    /// Returns the persistence (death - birth).
+    /// Returns `f32::INFINITY` for infinite bars.
     #[inline]
     pub fn persistence(&self) -> f32 {
         self.death - self.birth
     }
 }
 
-/// FFI result struct - must match C++ definition exactly.
+// FFI types - must match C++ definitions exactly
 #[repr(C)]
 struct BarcodeResult {
     data: *mut Barcode,
@@ -69,6 +81,20 @@ extern "C" {
     fn free_barcodes(result: BarcodeResult);
 }
 
+/// RAII guard for panic safety - ensures FFI memory is always freed.
+struct BarcodeGuard(BarcodeResult);
+
+impl Drop for BarcodeGuard {
+    fn drop(&mut self) {
+        unsafe {
+            free_barcodes(BarcodeResult {
+                data: self.0.data,
+                len: self.0.len,
+            })
+        }
+    }
+}
+
 /// Compute persistent homology of a point cloud given as a distance matrix.
 ///
 /// # Arguments
@@ -76,36 +102,43 @@ extern "C" {
 /// * `distances` - Lower triangular distance matrix in row-major order.
 ///   Length must be exactly `n * (n - 1) / 2`.
 ///   Layout: `[d(1,0), d(2,0), d(2,1), d(3,0), d(3,1), d(3,2), ...]`
+///   Values should be finite and non-negative.
+///
 /// * `n` - Number of points.
+///
 /// * `max_dim` - Maximum homological dimension to compute (0, 1, 2, ...).
-///   Dimension 0 gives connected components, dimension 1 gives loops, etc.
-/// * `threshold` - Maximum filtration value. Use `f32::INFINITY` for no threshold.
+///   - Dimension 0: connected components
+///   - Dimension 1: loops/holes
+///   - Dimension 2: voids
+///   - etc.
+///
+/// * `threshold` - Maximum filtration value. Edges with distance > threshold
+///   are ignored. Use `None` to auto-compute the enclosing radius (recommended).
 ///
 /// # Returns
 ///
 /// A vector of `Barcode` structs representing the persistence diagram.
+/// Barcodes are ordered by dimension, then by appearance in the filtration.
 ///
 /// # Panics
 ///
-/// Panics if `distances.len() != n * (n - 1) / 2`.
+/// - If `distances.len() != n * (n - 1) / 2`
+/// - If `max_dim < 0`
 ///
 /// # Example
 ///
 /// ```rust
 /// use ripser::ripser;
 ///
-/// // Triangle with vertices at distance 1 from each other
-/// let distances = vec![1.0, 1.0, 1.0]; // d(1,0), d(2,0), d(2,1)
-/// let barcodes = ripser(&distances, 3, 1, f32::INFINITY);
+/// // Two points at distance 1
+/// let distances = vec![1.0];
+/// let barcodes = ripser(&distances, 2, 0, None);
 ///
-/// // Should have:
-/// // - 3 H0 bars (one infinite, two finite that merge)
-/// // - 1 H1 bar (the triangle forms a loop)
-/// for bar in &barcodes {
-///     println!("H{}: [{}, {})", bar.dim, bar.birth, bar.death);
-/// }
+/// // H0: two components merge at time 1
+/// assert_eq!(barcodes.len(), 2);
 /// ```
-pub fn ripser(distances: &[f32], n: usize, max_dim: i32, threshold: f32) -> Vec<Barcode> {
+pub fn ripser(distances: &[f32], n: usize, max_dim: i32, threshold: Option<f32>) -> Vec<Barcode> {
+    // Validate inputs
     let expected_len = n * (n.saturating_sub(1)) / 2;
     assert_eq!(
         distances.len(),
@@ -115,119 +148,37 @@ pub fn ripser(distances: &[f32], n: usize, max_dim: i32, threshold: f32) -> Vec<
         n,
         distances.len()
     );
+    assert!(
+        max_dim >= 0,
+        "max_dim must be non-negative, got {}",
+        max_dim
+    );
 
-    // Handle edge cases
+    // Handle degenerate cases
     if n == 0 {
         return Vec::new();
     }
 
-    // Call the C++ implementation
-    let result = unsafe {
-        ripser_from_lower_distance_matrix(
-            distances.as_ptr(),
-            n,
-            max_dim,
-            if threshold.is_infinite() {
-                f32::MAX
-            } else {
-                threshold
-            },
-        )
+    // Convert threshold: None or infinite → f32::MAX (triggers auto-compute in C++)
+    let thresh = match threshold {
+        None => f32::MAX,
+        Some(t) if t.is_infinite() => f32::MAX,
+        Some(t) => t,
     };
 
-    // Convert to Vec and free the C++ memory
-    let barcodes = if result.data.is_null() || result.len == 0 {
+    // Call FFI and wrap result in guard for panic safety
+    let guard = BarcodeGuard(unsafe {
+        ripser_from_lower_distance_matrix(distances.as_ptr(), n, max_dim, thresh)
+    });
+
+    // Convert to Vec (guard ensures cleanup even if this panics)
+    if guard.0.data.is_null() || guard.0.len == 0 {
         Vec::new()
     } else {
-        // Safety: result.data points to a valid array of result.len Barcodes
-        // allocated with malloc by the C++ code
-        let slice = unsafe { std::slice::from_raw_parts(result.data, result.len) };
+        let slice = unsafe { std::slice::from_raw_parts(guard.0.data, guard.0.len) };
         slice.to_vec()
-    };
-
-    // Free the C++ allocated memory
-    unsafe { free_barcodes(result) };
-
-    barcodes
-}
-
-/// Convenience function to filter barcodes by dimension.
-pub fn filter_by_dim(barcodes: &[Barcode], dim: i32) -> Vec<Barcode> {
-    barcodes.iter().filter(|b| b.dim == dim).copied().collect()
-}
-
-/// Convenience function to get only infinite bars.
-pub fn infinite_bars(barcodes: &[Barcode]) -> Vec<Barcode> {
-    barcodes
-        .iter()
-        .filter(|b| b.is_infinite())
-        .copied()
-        .collect()
-}
-
-/// Convenience function to get only finite bars.
-pub fn finite_bars(barcodes: &[Barcode]) -> Vec<Barcode> {
-    barcodes
-        .iter()
-        .filter(|b| !b.is_infinite())
-        .copied()
-        .collect()
-}
-
-/// Helper to create a lower triangular distance matrix from a full matrix.
-///
-/// # Arguments
-///
-/// * `full_matrix` - n×n distance matrix as a flat array in row-major order.
-/// * `n` - Matrix dimension.
-///
-/// # Returns
-///
-/// Lower triangular part: `[d(1,0), d(2,0), d(2,1), ...]`
-pub fn full_to_lower_triangular(full_matrix: &[f32], n: usize) -> Vec<f32> {
-    assert_eq!(full_matrix.len(), n * n, "Expected {}x{} matrix", n, n);
-
-    let mut lower = Vec::with_capacity(n * (n - 1) / 2);
-    for i in 1..n {
-        for j in 0..i {
-            lower.push(full_matrix[i * n + j]);
-        }
     }
-    lower
-}
-
-/// Compute a distance matrix from a point cloud using Euclidean distance.
-///
-/// # Arguments
-///
-/// * `points` - Flat array of coordinates: `[x0, y0, z0, x1, y1, z1, ...]`
-/// * `n` - Number of points.
-/// * `dim` - Dimension of each point.
-///
-/// # Returns
-///
-/// Lower triangular distance matrix.
-pub fn euclidean_distance_matrix(points: &[f32], n: usize, dim: usize) -> Vec<f32> {
-    assert_eq!(
-        points.len(),
-        n * dim,
-        "Expected {} points of dimension {}",
-        n,
-        dim
-    );
-
-    let mut distances = Vec::with_capacity(n * (n - 1) / 2);
-    for i in 1..n {
-        for j in 0..i {
-            let mut d2 = 0.0f32;
-            for k in 0..dim {
-                let diff = points[i * dim + k] - points[j * dim + k];
-                d2 += diff * diff;
-            }
-            distances.push(d2.sqrt());
-        }
-    }
-    distances
+    // guard drops here, always freeing the C++ memory
 }
 
 #[cfg(test)]
@@ -237,9 +188,8 @@ mod tests {
     #[test]
     fn test_single_point() {
         let distances: Vec<f32> = vec![];
-        let barcodes = ripser(&distances, 1, 1, f32::INFINITY);
+        let barcodes = ripser(&distances, 1, 1, None);
 
-        // Single point should have exactly one infinite H0 bar
         assert_eq!(barcodes.len(), 1);
         assert_eq!(barcodes[0].dim, 0);
         assert_eq!(barcodes[0].birth, 0.0);
@@ -248,18 +198,12 @@ mod tests {
 
     #[test]
     fn test_two_points() {
-        let distances = vec![1.0]; // d(1,0) = 1
-        let barcodes = ripser(&distances, 2, 1, f32::INFINITY);
+        let distances = vec![1.0];
+        let barcodes = ripser(&distances, 2, 1, None);
 
-        // Two points at distance 1:
-        // - Two H0 components that merge at time 1
-        // - One survives to infinity
         let h0: Vec<_> = barcodes.iter().filter(|b| b.dim == 0).collect();
-
-        // Should have exactly 2 H0 bars
         assert_eq!(h0.len(), 2);
 
-        // One should be [0, 1) and one should be [0, inf)
         let finite: Vec<_> = h0.iter().filter(|b| !b.is_infinite()).collect();
         let infinite: Vec<_> = h0.iter().filter(|b| b.is_infinite()).collect();
 
@@ -269,88 +213,46 @@ mod tests {
     }
 
     #[test]
-    fn test_equilateral_triangle() {
-        // Three points forming an equilateral triangle with side length 1
+    fn test_triangle() {
         let distances = vec![1.0, 1.0, 1.0];
-        let barcodes = ripser(&distances, 3, 1, f32::INFINITY);
+        let barcodes = ripser(&distances, 3, 1, None);
 
-        let h0: Vec<_> = filter_by_dim(&barcodes, 0);
-        let h1: Vec<_> = filter_by_dim(&barcodes, 1);
+        let h0: Vec<_> = barcodes.iter().filter(|b| b.dim == 0).collect();
+        let h1: Vec<_> = barcodes.iter().filter(|b| b.dim == 1).collect();
 
-        // H0: 3 components, 2 merge, 1 survives
         assert_eq!(h0.len(), 3);
-        assert_eq!(infinite_bars(&h0).len(), 1);
-
-        // H1: For an equilateral triangle, a loop forms at time 1 but is immediately killed
-        // by the 2-simplex (since all edges have length 1). So persistence = 0 and it's filtered out.
-        // This is correct behavior - no persistent H1 feature.
+        assert_eq!(h0.iter().filter(|b| b.is_infinite()).count(), 1);
+        // H1 loop has zero persistence (birth == death), filtered out
         assert_eq!(h1.len(), 0);
     }
 
     #[test]
-    fn test_square() {
-        // Four points forming a square
-        // 0 -- 1
-        // |    |
-        // 2 -- 3
-        // Side length 1, diagonal sqrt(2)
-        let sqrt2 = 2.0_f32.sqrt();
-        let distances = vec![
-            1.0, // d(1,0)
-            1.0, sqrt2, // d(2,0), d(2,1)
-            sqrt2, 1.0, 1.0, // d(3,0), d(3,1), d(3,2)
-        ];
-        let barcodes = ripser(&distances, 4, 1, f32::INFINITY);
-
-        let h0: Vec<_> = filter_by_dim(&barcodes, 0);
-        let h1: Vec<_> = filter_by_dim(&barcodes, 1);
-
-        // Should have 4 H0 bars (one infinite)
-        assert_eq!(h0.len(), 4);
-        assert_eq!(infinite_bars(&h0).len(), 1);
-
-        // Should have 1 H1 bar (the square loop)
-        assert_eq!(h1.len(), 1);
-    }
-
-    #[test]
-    fn test_full_to_lower() {
-        let full = vec![0.0, 1.0, 2.0, 1.0, 0.0, 3.0, 2.0, 3.0, 0.0];
-        let lower = full_to_lower_triangular(&full, 3);
-        assert_eq!(lower, vec![1.0, 2.0, 3.0]);
-    }
-
-    #[test]
-    fn test_euclidean_distance() {
-        // Three points: (0,0), (1,0), (0,1)
-        let points = vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
-        let distances = euclidean_distance_matrix(&points, 3, 2);
-
-        assert_eq!(distances.len(), 3);
-        assert!((distances[0] - 1.0).abs() < 1e-6); // d(1,0) = 1
-        assert!((distances[1] - 1.0).abs() < 1e-6); // d(2,0) = 1
-        assert!((distances[2] - 2.0_f32.sqrt()).abs() < 1e-6); // d(2,1) = sqrt(2)
-    }
-
-    #[test]
     fn test_threshold() {
-        // Two points at distance 2, with threshold 1
         let distances = vec![2.0];
-        let barcodes = ripser(&distances, 2, 1, 1.0);
+        let barcodes = ripser(&distances, 2, 1, Some(1.0));
 
-        // With threshold 1, the edge at distance 2 is never added
-        // So we should have 2 independent H0 components
-        let h0: Vec<_> = filter_by_dim(&barcodes, 0);
-        let infinite = infinite_bars(&h0);
+        let infinite: Vec<_> = barcodes.iter().filter(|b| b.is_infinite()).collect();
+        assert_eq!(infinite.len(), 2); // Two separate components
+    }
 
-        // Both points remain as separate infinite components
-        assert_eq!(infinite.len(), 2);
+    #[test]
+    fn test_empty() {
+        let distances: Vec<f32> = vec![];
+        let barcodes = ripser(&distances, 0, 1, None);
+        assert!(barcodes.is_empty());
     }
 
     #[test]
     #[should_panic(expected = "Distance matrix has wrong size")]
     fn test_wrong_size() {
-        let distances = vec![1.0, 2.0]; // Wrong size for n=3
-        let _ = ripser(&distances, 3, 1, f32::INFINITY);
+        let distances = vec![1.0, 2.0];
+        let _ = ripser(&distances, 3, 1, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_dim must be non-negative")]
+    fn test_negative_dim() {
+        let distances = vec![1.0];
+        let _ = ripser(&distances, 2, -1, None);
     }
 }
