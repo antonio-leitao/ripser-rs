@@ -12,7 +12,7 @@
 //! // Layout: d(1,0), d(2,0), d(2,1)
 //! let distances = vec![1.0, 1.0, 1.0];
 //!
-//! let barcodes = ripser(&distances, 3, 1, f32::INFINITY);
+//! let barcodes = ripser(&distances, 3, 1, None);
 //!
 //! for bar in &barcodes {
 //!     println!("H{}: [{}, {})", bar.dim, bar.birth, bar.death);
@@ -79,6 +79,15 @@ extern "C" {
     ) -> BarcodeResult;
 
     fn free_barcodes(result: BarcodeResult);
+
+    fn ripser128_from_lower_distance_matrix(
+        distances: *const f32,
+        n: usize,
+        max_dim: i32,
+        threshold: f32,
+    ) -> BarcodeResult;
+
+    fn free_barcodes128(result: BarcodeResult);
 }
 
 /// RAII guard for panic safety - ensures FFI memory is always freed.
@@ -181,6 +190,71 @@ pub fn ripser(distances: &[f32], n: usize, max_dim: i32, threshold: Option<f32>)
     // guard drops here, always freeing the C++ memory
 }
 
+/// RAII guard for panic safety - ensures FFI memory is always freed (128-bit version).
+struct BarcodeGuard128(BarcodeResult);
+
+impl Drop for BarcodeGuard128 {
+    fn drop(&mut self) {
+        unsafe {
+            free_barcodes128(BarcodeResult {
+                data: self.0.data,
+                len: self.0.len,
+            })
+        }
+    }
+}
+
+/// Compute persistent homology using the 128-bit index variant of Ripser.
+///
+/// This is identical to [`ripser()`] but uses `__int128_t` internally for simplex
+/// indices, allowing it to handle larger simplicial complexes that would overflow
+/// 64-bit indices.
+///
+/// See [`ripser()`] for full documentation of parameters and return values.
+pub fn ripser128(distances: &[f32], n: usize, max_dim: i32, threshold: Option<f32>) -> Vec<Barcode> {
+    // Validate inputs
+    let expected_len = n * (n.saturating_sub(1)) / 2;
+    assert_eq!(
+        distances.len(),
+        expected_len,
+        "Distance matrix has wrong size: expected {} for n={}, got {}",
+        expected_len,
+        n,
+        distances.len()
+    );
+    assert!(
+        max_dim >= 0,
+        "max_dim must be non-negative, got {}",
+        max_dim
+    );
+
+    // Handle degenerate cases
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // Convert threshold: None or infinite → f32::MAX (triggers auto-compute in C++)
+    let thresh = match threshold {
+        None => f32::MAX,
+        Some(t) if t.is_infinite() => f32::MAX,
+        Some(t) => t,
+    };
+
+    // Call FFI and wrap result in guard for panic safety
+    let guard = BarcodeGuard128(unsafe {
+        ripser128_from_lower_distance_matrix(distances.as_ptr(), n, max_dim, thresh)
+    });
+
+    // Convert to Vec (guard ensures cleanup even if this panics)
+    if guard.0.data.is_null() || guard.0.len == 0 {
+        Vec::new()
+    } else {
+        let slice = unsafe { std::slice::from_raw_parts(guard.0.data, guard.0.len) };
+        slice.to_vec()
+    }
+    // guard drops here, always freeing the C++ memory
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +328,71 @@ mod tests {
     fn test_negative_dim() {
         let distances = vec![1.0];
         let _ = ripser(&distances, 2, -1, None);
+    }
+
+    // ========================================================================
+    // ripser128 tests
+    // ========================================================================
+
+    #[test]
+    fn test_128_single_point() {
+        let distances: Vec<f32> = vec![];
+        let barcodes = ripser128(&distances, 1, 1, None);
+
+        assert_eq!(barcodes.len(), 1);
+        assert_eq!(barcodes[0].dim, 0);
+        assert_eq!(barcodes[0].birth, 0.0);
+        assert!(barcodes[0].is_infinite());
+    }
+
+    #[test]
+    fn test_128_two_points() {
+        let distances = vec![1.0];
+        let barcodes = ripser128(&distances, 2, 1, None);
+
+        let h0: Vec<_> = barcodes.iter().filter(|b| b.dim == 0).collect();
+        assert_eq!(h0.len(), 2);
+
+        let finite: Vec<_> = h0.iter().filter(|b| !b.is_infinite()).collect();
+        let infinite: Vec<_> = h0.iter().filter(|b| b.is_infinite()).collect();
+
+        assert_eq!(finite.len(), 1);
+        assert_eq!(infinite.len(), 1);
+        assert_eq!(finite[0].death, 1.0);
+    }
+
+    #[test]
+    fn test_128_triangle() {
+        let distances = vec![1.0, 1.0, 1.0];
+        let barcodes = ripser128(&distances, 3, 1, None);
+
+        let h0: Vec<_> = barcodes.iter().filter(|b| b.dim == 0).collect();
+        let h1: Vec<_> = barcodes.iter().filter(|b| b.dim == 1).collect();
+
+        assert_eq!(h0.len(), 3);
+        assert_eq!(h0.iter().filter(|b| b.is_infinite()).count(), 1);
+        assert_eq!(h1.len(), 0);
+    }
+
+    #[test]
+    fn test_128_matches_64bit() {
+        // Verify ripser() and ripser128() produce identical results
+        let distances = vec![
+            1.0, 1.41, 2.0, 1.0, 1.41, 1.0,
+        ];
+        let n = 4;
+
+        let barcodes_64 = ripser(&distances, n, 2, None);
+        let barcodes_128 = ripser128(&distances, n, 2, None);
+
+        assert_eq!(barcodes_64.len(), barcodes_128.len(),
+            "Different number of barcodes: 64-bit={}, 128-bit={}",
+            barcodes_64.len(), barcodes_128.len());
+
+        for (b64, b128) in barcodes_64.iter().zip(barcodes_128.iter()) {
+            assert_eq!(b64.dim, b128.dim);
+            assert_eq!(b64.birth, b128.birth);
+            assert_eq!(b64.death, b128.death);
+        }
     }
 }

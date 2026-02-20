@@ -1,0 +1,24 @@
+[package]
+name = "ripser"
+version = "0.1.0"
+edition = "2021"
+description = "Rust bindings for Ripser - efficient computation of Vietoris-Rips persistence barcodes"
+license = "MIT"
+include = ["src/**/*", "ripser.cpp", "ripser128.cpp", "build.rs", "Cargo.toml"]
+authors = ["António Leitão"]
+repository = "https://github.com/antonio-leitao/ripser-rs"
+
+[lib]
+name = "ripser"
+path = "src/lib.rs"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
