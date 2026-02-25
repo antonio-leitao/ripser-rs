@@ -13,7 +13,6 @@ Rust bindings for [Ripser](https://github.com/Ripser/ripser), a lean C++ code fo
 
 ```rust
 use ripser::{ripser, Barcode, filter_by_dim};
-
 // Lower triangular distance matrix for 4 points
 // Layout: d(1,0), d(2,0), d(2,1), d(3,0), d(3,1), d(3,2)
 let distances = vec![
@@ -21,14 +20,11 @@ let distances = vec![
     2.0, 1.5,   // d(2,0), d(2,1)
     3.0, 2.5, 1.0, // d(3,0), d(3,1), d(3,2)
 ];
-
 // Compute persistent homology up to dimension 1
 let barcodes = ripser(&distances, 4, 1, None);
-
 for bar in &barcodes {
     println!("H{}: [{}, {})", bar.dim, bar.birth, bar.death);
 }
-
 // Filter by dimension
 let h0 = filter_by_dim(&barcodes, 0);
 let h1 = filter_by_dim(&barcodes, 1);
@@ -47,11 +43,12 @@ your dataset is too large for the default 64-bit index mode. Use `ripser128` ins
 
 ```rust
 use ripser::{ripser128, Barcode, filter_by_dim};
-
 let barcodes = ripser128(&distances, n, max_dim, None);
 ```
 
 `ripser128` has the same API as `ripser` but uses 128-bit simplex indices, supporting much larger point clouds at the cost of slower computation.
+
+> **Platform note:** `ripser128` is only available on Linux and macOS. It relies on `__int128`, which is not supported by MSVC on Windows. The function is gated behind `#[cfg(not(target_os = "windows"))]` and will not be compiled or available on Windows targets.
 
 ## API
 
@@ -65,6 +62,7 @@ pub fn ripser(
     threshold: Option<f32>, // Maximum filtration value (None for no limit)
 ) -> Vec<Barcode>
 
+#[cfg(not(target_os = "windows"))]
 pub fn ripser128(
     distances: &[f32],  // Lower triangular distance matrix
     n: usize,           // Number of points
@@ -104,7 +102,6 @@ The lower triangular distance matrix is stored in row-major order:
 ```
 
 Flattened: `[d10, d20, d21, d30, d31, d32, ...]`
-
 Length: `n * (n - 1) / 2`
 
 ## Building

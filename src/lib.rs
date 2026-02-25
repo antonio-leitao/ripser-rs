@@ -34,6 +34,13 @@
 //! Flattened: `[d10, d20, d21, d30, d31, d32, ...]`
 //!
 //! Length must be exactly `n * (n - 1) / 2`.
+//!
+//! ## Platform Support
+//!
+//! The standard `ripser()` function is available on all platforms.
+//!
+//! The `ripser128()` function (128-bit simplex indices for large point clouds) is only
+//! available on Unix platforms (Linux, macOS) because MSVC does not support `__int128`.
 
 /// A persistence barcode (birth-death pair) with dimension.
 #[repr(C)]
@@ -79,7 +86,10 @@ extern "C" {
     ) -> BarcodeResult;
 
     fn free_barcodes(result: BarcodeResult);
+}
 
+#[cfg(not(target_os = "windows"))]
+extern "C" {
     fn ripser128_from_lower_distance_matrix(
         distances: *const f32,
         n: usize,
@@ -191,8 +201,10 @@ pub fn ripser(distances: &[f32], n: usize, max_dim: i32, threshold: Option<f32>)
 }
 
 /// RAII guard for panic safety - ensures FFI memory is always freed (128-bit version).
+#[cfg(not(target_os = "windows"))]
 struct BarcodeGuard128(BarcodeResult);
 
+#[cfg(not(target_os = "windows"))]
 impl Drop for BarcodeGuard128 {
     fn drop(&mut self) {
         unsafe {
@@ -211,7 +223,18 @@ impl Drop for BarcodeGuard128 {
 /// 64-bit indices.
 ///
 /// See [`ripser()`] for full documentation of parameters and return values.
-pub fn ripser128(distances: &[f32], n: usize, max_dim: i32, threshold: Option<f32>) -> Vec<Barcode> {
+///
+/// # Platform Availability
+///
+/// This function is only available on Unix platforms (Linux, macOS).
+/// MSVC does not support `__int128`.
+#[cfg(not(target_os = "windows"))]
+pub fn ripser128(
+    distances: &[f32],
+    n: usize,
+    max_dim: i32,
+    threshold: Option<f32>,
+) -> Vec<Barcode> {
     // Validate inputs
     let expected_len = n * (n.saturating_sub(1)) / 2;
     assert_eq!(
@@ -331,9 +354,10 @@ mod tests {
     }
 
     // ========================================================================
-    // ripser128 tests
+    // ripser128 tests (not available on Windows)
     // ========================================================================
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_128_single_point() {
         let distances: Vec<f32> = vec![];
@@ -345,6 +369,7 @@ mod tests {
         assert!(barcodes[0].is_infinite());
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_128_two_points() {
         let distances = vec![1.0];
@@ -361,6 +386,7 @@ mod tests {
         assert_eq!(finite[0].death, 1.0);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_128_triangle() {
         let distances = vec![1.0, 1.0, 1.0];
@@ -374,20 +400,23 @@ mod tests {
         assert_eq!(h1.len(), 0);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_128_matches_64bit() {
         // Verify ripser() and ripser128() produce identical results
-        let distances = vec![
-            1.0, 1.41, 2.0, 1.0, 1.41, 1.0,
-        ];
+        let distances = vec![1.0, 1.41, 2.0, 1.0, 1.41, 1.0];
         let n = 4;
 
         let barcodes_64 = ripser(&distances, n, 2, None);
         let barcodes_128 = ripser128(&distances, n, 2, None);
 
-        assert_eq!(barcodes_64.len(), barcodes_128.len(),
+        assert_eq!(
+            barcodes_64.len(),
+            barcodes_128.len(),
             "Different number of barcodes: 64-bit={}, 128-bit={}",
-            barcodes_64.len(), barcodes_128.len());
+            barcodes_64.len(),
+            barcodes_128.len()
+        );
 
         for (b64, b128) in barcodes_64.iter().zip(barcodes_128.iter()) {
             assert_eq!(b64.dim, b128.dim);

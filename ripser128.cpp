@@ -65,6 +65,19 @@
 
 #include "robin-hood-hashing/src/include/robin_hood.h"
 
+#if defined(__GNUC__) && !defined(__clang__)
+#include <functional>
+namespace std {
+template <> struct hash<__int128> {
+    size_t operator()(__int128 val) const noexcept {
+        uint64_t lo = static_cast<uint64_t>(val);
+        uint64_t hi = static_cast<uint64_t>(static_cast<unsigned __int128>(val) >> 64);
+        return hash<uint64_t>()(lo) ^ (hash<uint64_t>()(hi) << 1);
+    }
+};
+}
+#endif
+
 template <class Key, class T, class H, class E>
 using hash_map = robin_hood::unordered_map<Key, T, H, E>;
 template <class Key> using hash = robin_hood::hash<Key>;
