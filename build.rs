@@ -17,11 +17,6 @@ fn main() {
     // Platform-specific flags
     if target.contains("msvc") {
         build.flag("/EHsc");
-        // MSVC is stricter about injected class names in templates.
-        // ripser.cpp uses the template class name `ripser` without explicit
-        // template arguments in contexts where MSVC requires them (C2955).
-        // /permissive makes MSVC accept this non-standard but widely supported pattern.
-        build.flag("/permissive");
     }
 
     build.compile("ripser");

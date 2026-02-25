@@ -1,6 +1,6 @@
 [package]
 name = "ripser"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Rust bindings for Ripser - efficient computation of Vietoris-Rips persistence barcodes"
 license = "MIT"
