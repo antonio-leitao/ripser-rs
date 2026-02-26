@@ -61,10 +61,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#ifdef USE_ROBINHOOD_HASHMAP
-
-#include "robin-hood-hashing/src/include/robin_hood.h"
-
+// std::hash<__int128> is not provided by libstdc++ (GCC), so we must define it.
 #if defined(__GNUC__) && !defined(__clang__)
 #include <functional>
 namespace std {
@@ -77,6 +74,10 @@ template <> struct hash<__int128> {
 };
 }
 #endif
+
+#ifdef USE_ROBINHOOD_HASHMAP
+
+#include "robin-hood-hashing/src/include/robin_hood.h"
 
 template <class Key, class T, class H, class E>
 using hash_map = robin_hood::unordered_map<Key, T, H, E>;
